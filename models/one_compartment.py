@@ -23,6 +23,30 @@ class OneCompartmentFit:
     covariance: np.ndarray
 
 
+@dataclass(frozen=True)
+class GoodnessOfFit:
+    """Diagnostics for how well a fitted model matches observed data.
+
+    Attributes:
+        r_squared: Coefficient of determination (1 - SS_res/SS_tot). Closer to
+            1.0 indicates the model explains more of the variance in the
+            observed data. Can be negative for a very poor fit.
+        aic: Akaike Information Criterion for the fit (lower is better when
+            comparing models fit to the same data). Undefined (NaN) for a
+            residual sum of squares of ~0, which only occurs with noiseless
+            synthetic data.
+        residuals: Observed minus predicted concentration at each time point.
+        se_c0: Standard error of the fitted C0, from the fit covariance matrix.
+        se_ke: Standard error of the fitted ke, from the fit covariance matrix.
+    """
+
+    r_squared: float
+    aic: float
+    residuals: np.ndarray
+    se_c0: float
+    se_ke: float
+
+
 def concentration_time_model(
     time: np.ndarray | float,
     c0: float,
@@ -81,3 +105,42 @@ def fit_one_compartment_model(
     )
 
     return OneCompartmentFit(c0=float(popt[0]), ke=float(popt[1]), covariance=pcov)
+
+
+def evaluate_goodness_of_fit(
+    time: np.ndarray,
+    concentration: np.ndarray,
+    fit: OneCompartmentFit,
+) -> GoodnessOfFit:
+    """Compute fit diagnostics for a fitted one-compartment model.
+
+    Args:
+        time: The same time values used to produce `fit`.
+        concentration: The same observed concentrations used to produce `fit`.
+        fit: Result of `fit_one_compartment_model`.
+
+    Returns:
+        GoodnessOfFit with R-squared, AIC, residuals, and parameter standard
+        errors.
+    """
+
+    predicted = concentration_time_model(time, fit.c0, fit.ke)
+    residuals = concentration - predicted
+
+    ss_res = float(np.sum(residuals**2))
+    ss_tot = float(np.sum((concentration - np.mean(concentration)) ** 2))
+    r_squared = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
+
+    n = time.size
+    k = 2  # number of fitted parameters: C0, ke
+    aic = float(n * np.log(ss_res / n) + 2 * k) if ss_res > 0 else float("nan")
+
+    standard_errors = np.sqrt(np.diag(fit.covariance))
+
+    return GoodnessOfFit(
+        r_squared=r_squared,
+        aic=aic,
+        residuals=residuals,
+        se_c0=float(standard_errors[0]),
+        se_ke=float(standard_errors[1]),
+    )

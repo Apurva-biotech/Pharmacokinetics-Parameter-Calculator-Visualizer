@@ -11,6 +11,11 @@ import pandas as pd
 
 REQUIRED_COLUMNS = ("time", "concentration")
 
+# Per standard NCA convention (e.g. FDA/EMA bioequivalence guidance), AUC0-inf
+# is considered unreliable for dosing/exposure decisions when more than 20% of
+# it is extrapolated beyond the last observed point rather than measured.
+AUC_EXTRAPOLATION_RELIABILITY_THRESHOLD_PCT = 20.0
+
 
 @dataclass(frozen=True)
 class PKParameters:
@@ -19,11 +24,19 @@ class PKParameters:
     Attributes:
         cmax: Maximum observed concentration.
         tmax: Time at which Cmax is observed.
-        auc: Area under the concentration-time curve by the linear trapezoidal rule.
+        auc: Area under the observed concentration-time curve (AUC0-last), by
+            the linear trapezoidal rule.
         ke: First-order elimination rate constant.
         half_life: Elimination half-life, calculated as ln(2) / ke.
         vd: Apparent volume of distribution after IV bolus, calculated as dose / C0.
         clearance: Clearance, calculated as ke * Vd.
+        auc_inf: AUC extrapolated to infinity (AUC0-last + Clast/ke).
+        auc_extrapolated_tail: The extrapolated portion of auc_inf (Clast/ke).
+        percent_auc_extrapolated: Percentage of auc_inf that is extrapolated,
+            not observed.
+        auc_extrapolation_reliable: False when percent_auc_extrapolated exceeds
+            AUC_EXTRAPOLATION_RELIABILITY_THRESHOLD_PCT (i.e. sampling didn't run
+            long enough for AUC0-inf, ke, t1/2, Vd, and CL to be trustworthy).
     """
 
     cmax: float
@@ -33,6 +46,10 @@ class PKParameters:
     half_life: float
     vd: float
     clearance: float
+    auc_inf: float
+    auc_extrapolated_tail: float
+    percent_auc_extrapolated: float
+    auc_extrapolation_reliable: bool
 
 
 def load_concentration_data(csv_path: str | Path) -> pd.DataFrame:
@@ -90,6 +107,47 @@ def calculate_auc(time: np.ndarray, concentration: np.ndarray) -> float:
     return float(np.trapezoid(concentration, time))
 
 
+def calculate_auc_extrapolated(
+    time: np.ndarray,
+    concentration: np.ndarray,
+    ke: float,
+    auc_last: float | None = None,
+) -> tuple[float, float, float, bool]:
+    """Extrapolate AUC0-last to AUC0-infinity and flag reliability.
+
+    AUC0-inf = AUC0-last + Clast/ke, where Clast is the last observed
+    concentration and ke is the terminal elimination rate constant. The
+    extrapolated tail should generally be a small fraction of the total; a
+    large fraction means sampling stopped before the terminal phase was well
+    characterized, and downstream parameters (t1/2, Vd, CL) should be treated
+    with caution.
+
+    Returns:
+        Tuple of (auc_inf, auc_extrapolated_tail, percent_auc_extrapolated,
+        auc_extrapolation_reliable).
+
+    Raises:
+        ValueError: If ke is not positive, or the last observed concentration
+            is not positive (extrapolation is undefined).
+    """
+
+    if ke <= 0:
+        raise ValueError("ke must be positive to extrapolate AUC to infinity.")
+
+    clast = float(concentration[-1])
+    if clast <= 0:
+        raise ValueError("Last observed concentration must be positive to extrapolate AUC.")
+
+    resolved_auc_last = float(auc_last) if auc_last is not None else calculate_auc(time, concentration)
+
+    auc_extrapolated_tail = clast / ke
+    auc_inf = resolved_auc_last + auc_extrapolated_tail
+    percent_auc_extrapolated = (auc_extrapolated_tail / auc_inf) * 100.0 if auc_inf > 0 else 0.0
+    auc_extrapolation_reliable = percent_auc_extrapolated <= AUC_EXTRAPOLATION_RELIABILITY_THRESHOLD_PCT
+
+    return auc_inf, auc_extrapolated_tail, percent_auc_extrapolated, auc_extrapolation_reliable
+
+
 def estimate_terminal_ke(
     time: np.ndarray,
     concentration: np.ndarray,
@@ -138,7 +196,8 @@ def calculate_pk_parameters(
         terminal_points: Number of final positive points used for terminal ke.
 
     Returns:
-        PKParameters with observed and derived parameters.
+        PKParameters with observed and derived parameters, including AUC
+        extrapolated to infinity and its reliability flag.
     """
 
     validate_concentration_data(data)
@@ -170,6 +229,10 @@ def calculate_pk_parameters(
     # For linear first-order elimination, systemic clearance equals ke * Vd.
     clearance = float(estimated_ke * vd)
 
+    auc_inf, auc_extrapolated_tail, percent_auc_extrapolated, auc_extrapolation_reliable = (
+        calculate_auc_extrapolated(time, concentration, estimated_ke, auc_last=auc)
+    )
+
     return PKParameters(
         cmax=cmax,
         tmax=tmax,
@@ -178,4 +241,8 @@ def calculate_pk_parameters(
         half_life=half_life,
         vd=vd,
         clearance=clearance,
+        auc_inf=auc_inf,
+        auc_extrapolated_tail=auc_extrapolated_tail,
+        percent_auc_extrapolated=percent_auc_extrapolated,
+        auc_extrapolation_reliable=auc_extrapolation_reliable,
     )

@@ -5,3 +5,4 @@ __pycache__/
 .streamlit-home/
 pk_profile.png
 results/
+.DS_Store
