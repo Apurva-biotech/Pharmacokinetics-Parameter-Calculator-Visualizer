@@ -1,6 +1,6 @@
 # PK Parameter Calculator & Visualizer
 
-A production-quality Python portfolio project for pharmacokinetic analysis of plasma concentration-time data. The tool reads a CSV file, validates analytical data, calculates core pharmacokinetic parameters, fits a one-compartment IV bolus model, and exports a publication-ready PNG visualization.
+A production-quality Python portfolio project for pharmacokinetic analysis of plasma concentration-time data. The tool reads a CSV file, validates analytical data, calculates core pharmacokinetic parameters (including AUC extrapolated to infinity with a reliability flag), fits a one-compartment IV bolus model with goodness-of-fit diagnostics, and exports a publication-ready PNG visualization.
 
 ## Preview
 
@@ -14,9 +14,10 @@ A production-quality Python portfolio project for pharmacokinetic analysis of pl
 This project is designed for biotechnology and computational pharmacokinetics portfolios. It demonstrates:
 
 - Robust CSV data ingestion and validation
-- Noncompartmental pharmacokinetic calculations
-- One-compartment IV bolus model fitting with `scipy.optimize.curve_fit`
+- Noncompartmental pharmacokinetic calculations, including AUC extrapolated to infinity with an automatic reliability flag
+- One-compartment IV bolus model fitting with `scipy.optimize.curve_fit`, including goodness-of-fit diagnostics (R², AIC, parameter standard errors, residuals)
 - Modular Python code with type hints and docstrings
+- A pytest suite covering the core calculations against hand-verified reference values
 - Reproducible visualization with `matplotlib`
 - Interactive web analysis with `streamlit` and `plotly`
 
@@ -28,10 +29,13 @@ pk_calculator/
 │   └── sample_data.csv
 ├── models/
 │   └── one_compartment.py
+├── tests/
+│   └── test_pk_calculations.py
 ├── calculator.py
 ├── visualizer.py
 ├── app.py
 ├── main.py
+├── pytest.ini
 ├── requirements.txt
 └── README.md
 ```
@@ -52,10 +56,17 @@ The calculator estimates:
 - **Cmax**: maximum observed plasma concentration.
 - **Tmax**: time at which Cmax occurs.
 - **AUC0-last**: area under the observed concentration-time curve, calculated with the linear trapezoidal rule.
+- **AUC0-inf**: AUC extrapolated to infinity as `AUC0-last + Clast/ke`. The app flags AUC0-inf as unreliable whenever the extrapolated tail exceeds 20% of the total — the standard NCA convention for deciding whether sampling ran long enough into the terminal phase.
 - **ke**: terminal elimination rate constant estimated from the slope of the log-linear terminal phase.
 - **t1/2**: elimination half-life, calculated as `ln(2) / ke`.
 - **Vd**: apparent volume of distribution for IV bolus dosing, calculated as `Dose / C0`.
 - **CL**: clearance, calculated as `ke * Vd`.
+
+The one-compartment IV bolus model fit additionally reports:
+
+- **R²** and **AIC** for the fit.
+- **Standard errors** on fitted C0 and ke, from the fit's covariance matrix.
+- A **residuals plot** (observed minus predicted vs. time) for visually checking whether a one-compartment model is actually appropriate for the data.
 
 The one-compartment IV bolus model is:
 
@@ -69,7 +80,6 @@ Key assumptions:
 - Distribution is instantaneous and can be represented by a single well-mixed compartment.
 - Elimination follows first-order kinetics.
 - The terminal phase is log-linear.
-- AUC is reported as observed AUC0-last and is not extrapolated to infinity.
 
 ## Installation
 
@@ -114,6 +124,16 @@ time,concentration
 8,4.9
 ```
 
+## Testing
+
+Run the test suite:
+
+```bash
+pytest tests/ -v
+```
+
+Coverage includes the trapezoidal AUC calculation, terminal ke estimation, AUC0-inf extrapolation (both the reliable and flagged-unreliable cases), end-to-end parameter calculation against hand-verified reference values, every input validation error path, one-compartment model fitting, and goodness-of-fit diagnostics.
+
 ## Example Output
 
 Console output:
@@ -124,6 +144,7 @@ PK Parameter Calculator & Visualizer
 Cmax:       50.0000
 Tmax:       0.0000
 AUC0-last:  163.6375
+AUC0-inf:   169.3815 (3.4% extrapolated — reliable)
 ke:         0.2786
 t1/2:       2.4884
 Vd:         20.2727
@@ -132,6 +153,8 @@ CL:         5.6470
 One-compartment model fit
 C0:         49.3273
 ke_fit:     0.3046
+R-squared:  0.9992
+AIC:        -13.3214
 
 Saved plot: pk_profile.png
 ```
@@ -145,9 +168,12 @@ The Streamlit interface provides:
 - CSV upload for files containing `time` and `concentration` columns.
 - Dose input from the sidebar.
 - Calculated PK parameters displayed as metrics.
-- Fitted one-compartment model parameters.
+- AUC0-last vs. AUC0-inf, with a color-coded banner flagging whether the extrapolation is reliable.
+- Fitted one-compartment model parameters and their standard errors.
+- Goodness-of-fit diagnostics (R², AIC), with an automatic warning when R² suggests a poor fit.
 - Interactive Plotly concentration-time visualization.
-- Downloadable `pk_results.csv` containing calculated parameters and model-fit results.
+- A residuals-vs-time plot for visually assessing fit quality.
+- Downloadable `pk_results.csv` containing all calculated parameters, extrapolation results, and model-fit diagnostics.
 
 If no CSV is uploaded, the app analyzes `data/sample_data.csv` so the project is immediately demo-ready.
 
@@ -202,12 +228,19 @@ The code is unit-consistent but unit-agnostic. For example, if dose is in mg and
 - ke is reported as inverse time.
 - half-life uses the same time unit as the input time column.
 
+## Limitations
+
+- **Validated on synthetic data only.** The test suite and example outputs use clean, noiseless or lightly perturbed exponential decay data. Real assay data has more complex noise structure, and parameter estimates (especially ke and half-life) should be interpreted with more caution on real datasets than on the synthetic cases this project has been checked against.
+- **One-compartment model only.** The residuals plot for the bundled sample data shows a slight systematic wave (not pure random scatter) even at R² = 0.9992, which is a classic early sign that a two-compartment model might fit the terminal phase better. Always check the residuals plot, not just R², before trusting the single-compartment ke and half-life for a given dataset.
+- **AUC0-inf extrapolation assumes true first-order terminal elimination.** If the terminal phase is not genuinely log-linear (e.g. flip-flop kinetics, multi-phasic elimination), both ke and the AUC0-inf extrapolation built on it will be unreliable even when the 20%-rule flag says otherwise.
+- **CSV-loading path and sidebar parameter interactions are not covered by the current test suite** — only the core calculation functions are. `load_concentration_data`'s file-reading behavior and the effect of changing "terminal points for ke" in the Streamlit sidebar are exercised manually, not by automated tests.
+
 ## Future Improvements
 
 - Add two-compartment IV bolus and oral absorption models.
-- Estimate AUC extrapolated to infinity with terminal residual area.
 - Support replicate observations and summary statistics.
 - Add weighted regression options for heteroscedastic concentration data.
-- Report confidence intervals and goodness-of-fit metrics.
+- Add confidence intervals on AUC0-inf (currently only a point estimate and a reliability flag).
 - Add authentication and project persistence for the Streamlit interface.
 - Export results to Excel and PDF reports.
+- Extend the test suite to cover CSV loading and sidebar parameter interactions.
